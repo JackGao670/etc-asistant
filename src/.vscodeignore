@@ -1,0 +1,14 @@
+src/**
+test/**
+scripts/**
+shared/**
+webview/**
+tsconfig.json
+.vscode/**
+.github/**
+.gitignore
+package-lock.json
+node_modules/.cache/**
+**/*.map
+**/*.log
+**/*.jsonl

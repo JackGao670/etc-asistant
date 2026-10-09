@@ -1,0 +1,18 @@
+{
+  "description": "支持串口、TCP 和 UDP 的本机通信工作台，提供自动发送与日志录制。",
+  "trustDescription": "通信操作需要信任工作区。",
+  "command.diagnostics": "ECT：运行环境与工作区诊断",
+  "command.serialProbe": "ECT：串口接收探针",
+  "command.stopProbe": "ECT：停止串口探针",
+  "command.tcpProbe": "ECT：TCP 回环探针",
+  "command.webviewProbe": "ECT：Webview 批次与 ACK 探针",
+  "command.open": "ECT：打开通信工作台",
+  "command.disconnectAll": "ECT：断开全部会话",
+  "view.communication": "通信",
+  "view.connections": "连接",
+  "view.welcome": "暂无会话。请打开工作台创建串口、TCP 或 UDP 连接。\n[打开通信工作台](command:ect.open)\n创建会话不会自动连接或发送。",
+  "setting.language": "工作台与动态提示的语言。命令标题跟随 VS Code 界面语言。",
+  "language.auto": "跟随 VS Code 界面语言。",
+  "language.zh": "简体中文。",
+  "language.en": "英语。"
+}

@@ -1,0 +1,32 @@
+name: ECT Windows validation
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+jobs:
+  software:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.11.0'
+      - name: Locate project
+        shell: pwsh
+        run: |
+          if (Test-Path 'src/package.json') { "ECT_ROOT=src" >> $env:GITHUB_ENV }
+          else { "ECT_ROOT=." >> $env:GITHUB_ENV }
+      - run: npm ci
+        working-directory: ${{ env.ECT_ROOT }}
+      - run: npm run typecheck
+        working-directory: ${{ env.ECT_ROOT }}
+      - run: npm test
+        working-directory: ${{ env.ECT_ROOT }}
+      - run: npm run package:vsix
+        working-directory: ${{ env.ECT_ROOT }}
+      - run: npm run inspect:vsix
+        working-directory: ${{ env.ECT_ROOT }}
+      - run: npm run probe:packaged
+        working-directory: ${{ env.ECT_ROOT }}
+      - run: npm audit --audit-level=high
+        working-directory: ${{ env.ECT_ROOT }}

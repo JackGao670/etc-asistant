@@ -1,0 +1,18 @@
+{
+  "description": "Local Serial, TCP and UDP communication workbench with automation and recording.",
+  "trustDescription": "Communication requires a trusted workspace.",
+  "command.diagnostics": "ECT: Runtime and Workspace Diagnostics",
+  "command.serialProbe": "ECT: Serial Receive Probe",
+  "command.stopProbe": "ECT: Stop Serial Probe",
+  "command.tcpProbe": "ECT: TCP Loopback Probe",
+  "command.webviewProbe": "ECT: Webview Batch and ACK Probe",
+  "command.open": "ECT: Open Communication Workbench",
+  "command.disconnectAll": "ECT: Disconnect All Sessions",
+  "view.communication": "Communication",
+  "view.connections": "Connections",
+  "view.welcome": "No sessions yet. Open the workbench to create a Serial, TCP or UDP connection.\n[Open Communication Workbench](command:ect.open)\nCreating a session does not automatically connect or send.",
+  "setting.language": "Workbench and dynamic prompt language. Command titles follow the VS Code display language.",
+  "language.auto": "Follow the VS Code display language.",
+  "language.zh": "Simplified Chinese.",
+  "language.en": "English."
+}

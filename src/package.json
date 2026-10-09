@@ -1,0 +1,80 @@
+{
+  "name": "ect-toolkit",
+  "displayName": "Embedded Communication Toolkit",
+  "description": "%description%",
+  "version": "0.1.7",
+  "publisher": "ect-local",
+  "author": "常州竟锋软件有限公司",
+  "license": "MIT",
+  "private": true,
+  "engines": { "vscode": "^1.95.0", "node": ">=22.11.0" },
+  "categories": ["Other"],
+  "extensionKind": ["ui"],
+  "main": "./dist/extension.js",
+  "capabilities": {
+    "untrustedWorkspaces": { "supported": "limited", "description": "%trustDescription%" },
+    "virtualWorkspaces": { "supported": false }
+  },
+  "contributes": {
+    "commands": [
+      { "command": "ect.diagnostics", "title": "%command.diagnostics%" },
+      { "command": "ect.serialProbe", "title": "%command.serialProbe%" },
+      { "command": "ect.stopProbe", "title": "%command.stopProbe%" },
+      { "command": "ect.tcpProbe", "title": "%command.tcpProbe%" },
+      { "command": "ect.webviewProbe", "title": "%command.webviewProbe%" },
+      { "command": "ect.open", "title": "%command.open%", "icon": "$(open-preview)" },
+      { "command": "ect.disconnectAll", "title": "%command.disconnectAll%" }
+    ],
+    "viewsContainers": {
+      "activitybar": [{ "id": "ect", "title": "%view.communication%", "icon": "media/communication.svg" }]
+    },
+    "views": {
+      "ect": [{ "id": "ect.connections", "name": "%view.connections%" }]
+    },
+    "viewsWelcome": [
+      { "view": "ect.connections", "contents": "%view.welcome%" }
+    ],
+    "menus": {
+      "view/title": [
+        { "command": "ect.open", "when": "view == ect.connections", "group": "navigation" }
+      ]
+    },
+    "configuration": {
+      "title": "ECT",
+      "properties": {
+        "ect.language": { "type": "string", "enum": ["auto", "zh-CN", "en"], "default": "auto",
+          "description": "%setting.language%", "enumDescriptions": ["%language.auto%", "%language.zh%", "%language.en%"] },
+        "ect.defaultDisplayMode": { "type": "string", "enum": ["hex", "ascii"], "default": "hex" }
+      }
+    }
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "node scripts/build.mjs && vite build --config webview/vite.config.mts",
+    "vscode:prepublish": "npm run typecheck && npm run build",
+    "test": "tsx --test test/*.test.ts",
+    "probe:serial": "tsx scripts/serial-probe.ts",
+    "probe:pipeline": "tsx scripts/pipeline-probe.ts",
+    "test:extension": "tsx scripts/extension-test.ts",
+    "package:vsix": "vsce package --target win32-x64 --out ../ect-toolkit-0.1.7-win32-x64.vsix",
+    "inspect:vsix": "tsx scripts/inspect-vsix.ts",
+    "probe:packaged": "tsx scripts/packaged-native-probe.ts"
+  },
+  "dependencies": { "serialport": "12.0.0", "zod": "3.24.2" },
+  "devDependencies": {
+    "@types/node": "22.10.2",
+    "@types/vscode": "1.95.0",
+    "@vscode/test-electron": "2.4.1",
+    "@vscode/vsce": "3.2.2",
+    "esbuild": "0.25.10",
+    "tsx": "4.20.6",
+    "typescript": "5.7.3",
+    "yauzl": "3.4.0",
+    "@types/yauzl": "2.10.3",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "@types/react": "18.3.18",
+    "@types/react-dom": "18.3.5",
+    "vite": "6.4.4"
+  }
+}

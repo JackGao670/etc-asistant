@@ -1,0 +1,1239 @@
+借鉴 COMTool 的功能模型，但不直接把 COMTool 搬进 VS Code；采用 TypeScript + VS Code Extension + Webview，重新构建通信核心。
+
+VS Code Embedded Communication Toolkit 技术开发方案
+
+修订版本：审计修订版 v1.1
+审计日期：2026-10-09
+
+审计结论：
+技术路线合理，保留 TypeScript + VS Code Extension + React Webview +
+Node.js net/dgram + SerialPort，不引入 Python 运行时或独立 Electron 应用。
+原方案属于功能愿景，尚不能直接作为实现和发布验收依据。
+本次补齐运行位置、原生依赖、通信语义、生命周期、背压、安全和测试边界。
+文中的默认上限与性能指标是初始设计目标，需经原型和真实设备验证后冻结，
+不代表已经完成实现或性能认证。
+
+关键调整：
+1. MVP 先支持桌面版 VS Code、本地通信；Windows x64 为首个认证平台。
+2. Transport 增加状态、事件元数据、发送目标和取消操作，保留不同接口的能力差异。
+3. Session 统一管理连接、自动重连、发送队列和资源释放。
+4. 接收原始数据、日志记录、UI 展示分流，所有队列按字节设上限。
+5. 项目配置不触发自动连接或自动发送，默认仅监听回环地址。
+6. 修正 CRC 与帧长度示例，补充可量化验收和分平台 VSIX 发布要求。
+
+1. 项目概述
+1.1 项目名称
+
+暂定：
+
+Embedded Communication Toolkit（ECT）
+VS Code 嵌入式通信调试工具箱
+
+中文名称：
+
+VS Code 嵌入式通信调试助手
+
+目标是开发一款面向嵌入式软件工程师的 VS Code 插件，将传统 SSCOM、网络调试助手、串口调试助手、简单协议分析工具、数据曲线工具等能力统一到 VS Code 中。
+
+核心目标：
+
+让开发者不离开 VS Code，即可完成 Serial / TCP / UDP 等常用通信接口的连接、收发、协议调试、日志记录和数据分析。
+
+2. 产品定位
+
+目前 VS Code 的嵌入式生态已经拥有：
+
+Cortex-Debug
+PlatformIO
+Serial Monitor
+Embedded Plotter
+CMSIS Debugger
+
+但是这些工具通常分别解决：
+
+烧录
+调试
+串口
+数据曲线
+
+本项目拟提供一个类似：
+
+SSCOM + TCP/UDP Network Debugger
+
+的综合工作台。这里是产品定位，不作“市场上不存在同类插件”的断言；
+立项前仍需核对 Marketplace 中同类产品的功能、维护状态和差异化价值。
+
+本项目定位：
+
+                 VS Code
+                    │
+       ┌────────────┴────────────┐
+       │                         │
+   Code / Debug             Communication
+       │                         │
+       │                ┌────────┴────────┐
+       │                │                 │
+       │              Serial          Network
+       │                │            ┌────┴────┐
+       │                │            TCP      UDP
+       │                │
+       └────────────────┴─────────────────────
+                        │
+                  Protocol Tools
+                        │
+             ┌──────────┼──────────┐
+             │          │          │
+            HEX        CRC       Parser
+3. 第一阶段功能范围
+
+第一版不建议做得过于复杂。
+
+3.1 通信接口
+Serial
+
+支持：
+
+COM 自动枚举
+COM 口选择
+波特率
+数据位
+停止位
+校验位
+DTR
+RTS
+自动重连
+打开/关闭
+
+串口路径抽象为 path，Windows 使用 COM7，Linux/macOS 使用设备路径。
+自动枚举只是快照：支持手动刷新与手动输入，不假定所有设备都有稳定 serialNumber。
+端口占用、权限不足、拔插、驱动缺失需分别提示；不自动提权或修改系统权限。
+重连优先按可用的设备标识匹配，遇到多个候选时要求用户选择，不能误连其他设备。
+DTR/RTS 变化可能导致开发板复位：连接前展示配置，支持“驱动默认/显式设置”，
+不能保证打开串口时无信号跳变。硬件流控启用时不提供冲突的手动 RTS 控制。
+
+典型配置：
+
+COM7
+115200
+8
+N
+1
+TCP Client
+
+例如：
+
+TCP Client
+
+Host:
+192.168.1.100
+
+Port:
+5000
+
+[Connect]
+
+支持：
+
+TCP Client
+Connect / Disconnect
+自动重连
+收发
+HEX / ASCII
+TCP Server
+TCP Server
+
+Listen:
+127.0.0.1
+
+Port:
+5000
+
+[Start]
+
+支持：
+
+Listen
+Client 列表
+多客户端
+指定客户端发送
+
+默认监听 127.0.0.1，监听 0.0.0.0 或其他非回环地址需显式选择并提示暴露风险。
+TCP Server 的 Session 表示监听器，其内部维护带唯一 clientId 的客户端集合；
+同一监听器的收发记录必须带 clientId 和远端地址。
+每次发送明确选择一个客户端或显式广播；不允许把“未选择目标”解释为广播。
+广播返回逐客户端结果，不把部分成功显示为全部成功。
+MVP 默认最多 16 个客户端，超过限制拒绝新连接，并显示原因。
+UDP
+
+支持：
+
+UDP RX
+
+Local Port:
+6000
+
+Remote:
+192.168.1.100:6001
+
+支持：
+
+UDP Listener
+UDP Send
+广播
+单播
+
+MVP 使用 IPv4 单播与广播；IPv6、组播、跨网络自动发现后续单独验证。
+默认绑定 127.0.0.1，本机以外接收需显式选择绑定地址。
+广播默认关闭；远端地址与端口必填，不自动向最后一个发送方回复。
+每个接收事件保留发送方地址、端口和 datagram 边界。
+UDP 不提供交付、顺序或去重保证；内核或网络丢包无法仅凭本地计数确认。
+初始发送上限为 1400 字节/报文，可在合法 IPv4 UDP 载荷上限 65507 内调整；
+界面提示分片风险，不自动拆分报文，也不将多个报文拼成字节流。
+4. 统一数据模型
+
+这是整个系统非常重要的一层。
+
+不应该让 UI 直接操作：
+
+SerialPort
+net.Socket
+dgram.Socket
+
+而应该抽象成统一接口：
+
+Transport
+    │
+    ├── SerialTransport
+    ├── TcpClientTransport
+    ├── TcpServerTransport
+    └── UdpTransport
+
+统一定义（Extension Host 内部契约草案，实际实现需编译与契约测试）：
+
+type TransportKind = "serial" | "tcp-client" | "tcp-server" | "udp";
+type TransportStatus =
+    | "closed" | "opening" | "connected" | "listening"
+    | "closing" | "reconnecting" | "error";
+
+interface Disposable {
+    dispose(): void;
+}
+
+type SendTarget =
+    | { kind: "client"; clientId: string }
+    | { kind: "broadcast" }
+    | { kind: "udp"; address: string; port: number };
+
+interface ReceiveEvent {
+    data: Buffer;
+    boundary: "stream-chunk" | "datagram";
+    receivedAt: number;
+    clientId?: string;
+    remote?: { address: string; port: number };
+}
+
+type TransportEvent =
+    | { type: "data"; value: ReceiveEvent }
+    | { type: "status"; status: TransportStatus }
+    | { type: "error"; code: string; message: string; recoverable: boolean }
+    | { type: "peer"; action: "joined" | "left"; clientId: string;
+        remote: { address: string; port: number } };
+
+interface SendResult {
+    acceptedBytes: number;
+    peers?: Array<{ clientId: string; acceptedBytes: number; error?: string }>;
+}
+
+interface Transport {
+    readonly kind: TransportKind;
+    readonly capabilities: {
+        stream: boolean;
+        targetClient: boolean;
+        broadcast: boolean;
+        serialSignals: boolean;
+    };
+    open(signal?: AbortSignal): Promise<void>;
+    close(): Promise<void>;
+    send(data: Buffer, target?: SendTarget, signal?: AbortSignal): Promise<SendResult>;
+    subscribe(callback: (event: TransportEvent) => void): Disposable;
+    getStatus(): TransportStatus;
+    dispose(): Promise<void>;
+}
+
+补充约束：
+配置使用按 kind 区分的联合类型，不用一个包含大量可选字段的配置对象。
+serial 与 tcp-client 禁止 SendTarget；tcp-server 必须指定 client/broadcast；
+UDP 可使用显式目标或已验证的会话默认远端，非法组合在 Host 中拒绝。
+capabilities 用于禁用不支持的 UI 操作，不代替 Host 参数验证。
+open/close/dispose 幂等；并发操作串行化，close 可取消未完成的 open。
+所有失败必须有稳定错误码，不能只依赖面向用户的错误字符串。
+send 成功只表示本地写入完成，不表示设备已收到或业务命令执行成功。
+TCP/串口结合 write 回调与 drain/backpressure 控制，UDP 使用 send 回调。
+取消只能阻止尚未发送的数据；已交给系统的字节不能撤回。
+写入超时后若无法确认底层写入已结束，应关闭该连接并清理待发队列，
+不能直接开始下一次写入造成顺序交错；TCP Server 按受影响客户端隔离处理。
+事件订阅返回可释放句柄，监听器在打开前注册，避免漏掉首批数据。
+Buffer 仅用于 Host 内部；共享层不能依赖 Node.js 或 VS Code API。
+
+这样以后可以逐步增加：
+
+WebSocket
+MQTT
+BLE
+CAN
+USB CDC
+
+复用 Session、日志和基础 UI；MQTT 的 topic/QoS、CAN 的帧标识等特殊语义
+仍需专属 capability、元数据及 UI，不能承诺新增协议完全不改 UI。
+
+5. 数据流架构
+
+整体架构建议：
+
+┌─────────────────────────────────────────────┐
+│                  VS Code                    │
+│                                             │
+│  ┌──────────────┐       ┌───────────────┐ │
+│  │ Activity Bar │       │ Editor/Webview │ │
+│  │              │       │               │ │
+│  │ Connections  │       │ RX Console    │ │
+│  │ Sessions     │       │ TX Console    │ │
+│  │ Protocol     │       │ Quick Send    │ │
+│  │ Logs         │       │ Plot          │ │
+│  └──────┬───────┘       └───────┬───────┘ │
+│         │                        │         │
+│         └──────────┬─────────────┘         │
+│                    ↓                       │
+│          Extension Host                   │
+│                    │                       │
+│          Communication Core               │
+│                    │                       │
+│       ┌────────────┼────────────┐          │
+│       ↓            ↓            ↓          │
+│    Serial         TCP          UDP         │
+│       │            │            │          │
+└───────┼────────────┼────────────┼──────────┘
+        ↓            ↓            ↓
+     STM32        ESP32       Network
+
+实际接收链路：
+Transport -> Session 原始事件（序号/时间/来源）-> 记录队列
+                                            -> 有界展示缓存 -> 批量 Webview 消息
+                                            -> 后续可选 Framer/Parser -> Plot
+记录不依赖 Webview 是否显示；关闭面板不等于关闭连接。
+扩展停用或窗口关闭时停止任务并释放资源；不能保证崩溃/强制退出前最后一批日志落盘。
+6. VS Code 插件结构
+
+建议项目采用：
+
+ect-vscode/
+│
+├── package.json
+├── tsconfig.json
+├── README.md
+│
+├── src/
+│   ├── extension.ts
+│   │
+│   ├── transport/
+│   │   ├── transport.ts
+│   │   ├── serial.ts
+│   │   ├── tcp-client.ts
+│   │   ├── tcp-server.ts
+│   │   └── udp.ts
+│   │
+│   ├── session/
+│   │   ├── session.ts
+│   │   ├── session-manager.ts
+│   │   └── session-store.ts
+│   │
+│   ├── protocol/
+│   │   ├── codec.ts
+│   │   ├── hex.ts
+│   │   ├── crc.ts
+│   │   └── parser.ts
+│   │
+│   ├── logger/
+│   │   └── logger.ts
+│   │
+│   └── webview/
+│       ├── communication-panel.ts
+│       └── webview-provider.ts
+│
+├── webview/
+│   ├── src/
+│   │   ├── App.tsx
+│   │   ├── components/
+│   │   ├── views/
+│   │   └── stores/
+│   │
+│   └── vite.config.ts
+│
+└── test/
+
+补充目录和职责：
+shared/                 Host/Webview DTO、消息类型、运行时 Schema，不引用 Buffer
+src/config/             JSON Schema、校验、迁移、多根工作区与配置持久化
+src/core/               错误码、有界队列、重试策略、计数器
+src/tree/               Connections TreeDataProvider、命令和上下文菜单
+src/webview/message-router.ts  消息白名单、校验、请求响应
+test/unit/              Codec、状态机、配置、队列测试
+test/integration/       TCP/UDP 回环与模拟串口测试
+test/extension/         Extension Development Host 集成测试
+scripts/                构建、打包、产物检查
+
+src/protocol/ 中 CRC/Parser 属于后续里程碑，MVP 仅实现 Codec。
+采用一个根 package.json + 锁文件统一管理依赖和脚本，webview 不另建独立锁文件。
+Host 与 Webview 分开构建：Host 输出 Node.js bundle，Webview 输出静态资源。
+serialport 及原生 bindings 保留为运行时依赖，不能打进浏览器包。
+Vite 的开发服务器只用于开发，生产 VSIX 不依赖 localhost 或 CDN。
+7. 技术栈
+Extension Host
+
+建议：
+
+TypeScript
+Node.js
+VS Code Extension API
+
+通信：
+
+Serial:
+serialport
+
+TCP:
+Node.js net
+
+UDP:
+Node.js dgram
+UI
+
+建议：
+
+React
+TypeScript
+Vite
+
+UI 组件可以采用：
+
+VS Code Webview
++
+React
+
+不建议第一版使用 Electron。
+
+因为：
+
+VS Code 本身就是 Electron。
+
+插件再套一层 Electron 没有意义。
+
+7.1 运行环境与支持边界
+
+MVP 是桌面版 VS Code 的 Node.js 扩展，不支持 vscode.dev/github.dev 浏览器通信。
+package.json 使用 main 入口，extensionKind: ["ui"]，不声明 browser 入口。
+通信端点属于本机：Remote SSH/WSL/Dev Containers 打开工作区时仍访问 UI 本机设备，
+不能把本机 COM 口当成远程设备，也不自动在远程 Host 建立第二套通信核心。
+远程设备访问/本地与远程双 Host 桥接是后续功能，不属于本版承诺。
+界面始终标示“通信运行位置：本机”；TCP 地址也从本机网络视角解释。
+远程工作区配置通过 workspace.fs + Uri 访问，不用本机 fs 拼接远程路径。
+远程工作区读取能力需在原型阶段实测；不可访问时禁用项目配置并明确提示，
+本地保存的会话仍可使用，不默默读取其他工作区。
+
+首个认证目标：Windows x64 + 仍受 VS Code 支持的 Windows 版本。
+Linux x64、macOS arm64/x64、Windows arm64 只有完成原生模块与设备测试后才声明支持。
+engines.vscode、@types/vscode、Node.js 语法目标按选定最低 VS Code 版本对齐，
+在最低版本和发布时稳定版上均测试；构建机 Node.js 版本不等于 Host 运行时版本。
+SerialPort 具体版本、Node-API 支持和预编译产物覆盖范围在依赖锁定时记录。
+运行环境仍可能需要 USB 串口驱动、设备权限、网络/防火墙授权。
+
+8. Webview 与 Extension Host 通信
+
+采用 VS Code 标准：
+
+Webview
+    │
+    │ postMessage()
+    ↓
+Extension Host
+    │
+    ↓
+Transport
+
+例如用户点击：
+
+[SEND]
+
+Webview：
+
+vscode.postMessage({
+    version: 1,
+    requestId: "req-0001",
+    type: "send",
+    sessionId: "stm32-com7",
+    data: "01 03 00 10 00 02",
+    format: "hex"
+});
+
+Extension：
+
+Webview
+   ↓
+Message Router
+   ↓
+Session Manager
+   ↓
+SerialTransport
+   ↓
+COM7
+
+返回：
+
+COM7
+ ↓
+SerialTransport
+ ↓
+Session Manager
+ ↓
+Webview
+ ↓
+RX Console
+
+消息协议要求：
+所有命令带 version/requestId/sessionId，Host 返回带同一 requestId 的成功或错误响应。
+Webview 响应超时不自动重发 send，避免重复执行设备命令。
+Host 校验 type 白名单、session 存在性、状态、format、目标和数据大小；
+TypeScript 类型不能替代运行时校验，禁止通过消息调用任意函数/执行 shell。
+MVP 单次发送原始字节上限 64 KiB，UDP 另受报文限制；
+入站消息先做字段长度限制（例如编码数据字符串最多 256 KiB），再解码。
+接收 DTO 使用 base64 字符串 + sessionId/sequence/timestamp/direction/peer 元数据，
+不把 Buffer、Socket、Error 实例直接通过 postMessage 传递。
+Host 为事实来源，Webview ready 后发送快照，再按递增序号推送增量。
+数据批次限制、确认与重新同步机制见第 24 节；控制响应不受数据展示拥堵阻塞。
+acquireVsCodeApi 仅调用一次，不暴露给全局；setState 只保存少量 UI 状态。
+默认不启用 retainContextWhenHidden，不把大量接收数据保存在 Webview 状态中。
+9. Session 设计
+
+这是产品区别于普通串口插件的重要地方。
+
+每一个连接都是一个 Session。
+
+例如：
+
+Session #1
+STM32
+COM7
+115200
+OPEN
+Session #2
+ESP32
+COM8
+921600
+OPEN
+Session #3
+Device Server
+TCP
+192.168.1.100:5000
+CONNECTED
+Session #4
+Sensor
+UDP
+:6000
+LISTEN
+
+最终：
+
+SessionManager
+│
+├── STM32
+├── ESP32
+├── TCP Device
+└── UDP Sensor
+
+实现多设备同时调试。
+
+Session 的持久配置与运行状态分离：
+配置含 id/name/transport/quickCommands；连接句柄、计数、计时器不写入配置。
+默认最多 8 个活动 Session，可根据压测调整；总量还受全局缓存预算约束。
+串口路径/监听地址端口冲突应在操作前检测，并保留底层系统错误兜底。
+SessionManager 是生命周期唯一所有者，不让 Webview 自行维护连接状态。
+
+状态及恢复策略：
+closed -> opening -> connected/listening -> closing -> closed。
+意外断开进入 error；只有已启用重连的 Serial/TCP Client 进入 reconnecting。
+TCP Server/UDP 绑定失败不自动重试；单个 TCP Server 客户端离线不改变监听器状态。
+重连默认关闭；启用后指数退避（1/2/4/8 秒，最大 30 秒，附带抖动）、
+默认最多 10 次，成功后复位计数，并允许手动取消。
+手动断开、删除会话、停用扩展必须取消重连和自动发送。
+每次连接递增 generation，过期连接事件和过期 open 结果不得更新新连接状态；
+晚到的旧句柄必须关闭，避免泄漏。
+默认连接超时 10 秒、单次写入等待超时 5 秒、关闭等待超时 3 秒。
+超时后清理资源；部分发送/发送结果未知需明确提示，不自动重放。
+
+10. 数据显示模式
+
+必须把：
+
+传输格式
+
+和：
+
+显示格式
+
+分开。
+
+例如实际收到：
+
+01 03 00 10 FF 23
+
+可以显示：
+
+HEX
+01 03 00 10 FF 23
+ASCII
+.....#
+Decimal
+1 3 0 16 255 35
+Binary
+00000001 00000011 ...
+
+因此定义：
+
+enum DisplayMode {
+    HEX,
+    ASCII,
+    DECIMAL,
+    BINARY
+}
+
+MVP 实现 HEX 与 ASCII；Decimal/Binary 后续补充，不作为首版发布阻塞项。
+原始数据始终是字节；HEX 是输入/显示编码，不是通信协议。
+HEX 输入严格校验偶数位和合法字符；MVP 允许空白分隔，不默认接受 0x/逗号混合语法。
+ASCII 模式限定 7-bit 文本发送，超范围字符报错；接收非可打印字节显示 "." 或转义。
+UTF-8 是独立文本编码扩展，启用时用流式解码器处理跨块多字节，不冒充 ASCII。
+发送换行单独选择 none/LF/CRLF，HEX 默认不附加换行。
+显示格式切换从原始字节重算，不能二次解码已经格式化的字符串。
+TCP/Serial onData 只是任意字节块，不是完整报文；日志标识 chunk，不将其称为 packet。
+11. 自动发送
+
+SSCOM 一个非常实用的功能就是自动发送。
+
+本项目保留。
+
+例如：
+
+Command:
+01 03 00 10 00 02
+
+Interval:
+1000 ms
+
+☑ Auto Send
+
+或者：
+
+Quick Command:
+
+[获取版本]
+[获取状态]
+[拍照]
+[复位]
+
+配置保存到：
+
+.vscode/ect.json
+
+例如：
+
+{
+    "version": 1,
+    "commands": [
+        {
+            "id": "read-status",
+            "name": "获取状态",
+            "data": "01 03 00 10 00 02",
+            "format": "hex",
+            "lineEnding": "none"
+        }
+    ]
+}
+
+调度器运行在 Host，不依赖 Webview 计时器。
+一个会话只有一个有界串行发送队列，手动、快捷和自动发送共用。
+初始限制：每 Session 最多 100 条待发任务且总载荷不超过 1 MiB。
+队列满时拒绝新任务并提示；不悄悄丢弃或无限排队。
+自动发送使用“上次发送完成后再等待 interval”的调度，最小间隔 50 ms；
+这不是硬实时或固定频率工具，不使用 setInterval 产生重叠写入。
+掉线即暂停并清理未发任务；重连后默认仍暂停，用户确认后恢复。
+广播自动发送与复位等危险快捷命令需明确确认，不从项目文件自行启用。
+清空 RX 展示不清空录制文件；停止自动发送与断开连接是独立操作。
+12. 协议工具
+
+MVP 之后的后续版本 A 增加，与第 18 节 Phase 2 通信核心不同。
+
+CRC
+
+内置：
+
+CRC8
+CRC16
+CRC16-MODBUS
+CRC16-CCITT
+CRC32
+Checksum
+XOR
+
+例如：
+
+01 03 00 10 00 02
+
+自动计算：
+
+CRC16-MODBUS
+C5 CE
+
+CRC 参数：width=16, poly=0x8005（反射计算用 0xA001）,
+init=0xFFFF, refin=true, refout=true, xorout=0x0000。
+上述 CRC 数值为 0xCEC5，在线路上低字节优先为 C5 CE。
+校验基准："123456789" 的 CRC-16/MODBUS 为 0x4B37。
+CRC8/CRC16/CRC16-CCITT 不是充分的算法标识，必须列出具体变体参数，
+以及覆盖范围和追加字节序；Checksum/XOR 也需定义宽度、溢出和覆盖范围。
+
+可以支持：
+
+[Calculate CRC]
+
+以及：
+
+[Send + CRC]
+13. Protocol Parser
+
+这是后期非常值得做的功能。
+
+例如 STM32：
+
+AA 55
+01
+04
+00 10
+00 02
+BF 1C
+
+定义协议：
+
+Header = AA55
+Command = 1 byte
+Length = 1 byte
+Payload = N bytes
+CRC = 2 bytes（CRC-16/MODBUS，低字节优先）
+Length 只表示 Payload 字节数；CRC 覆盖 Header 到 Payload 的全部 8 个字节。
+
+工具自动解析：
+
+Command: 0x01
+Length: 4
+Payload: 00 10 00 02
+CRC: PASS（计算值 0x1CBF，线路字节 BF 1C）
+
+这是自定义帧示例，不是合法 Modbus RTU 报文。
+Parser 必须位于 Framer 后；Framer 按连接维护缓冲区，
+TCP Server 按 clientId 独立维护，避免不同客户端的数据混合。
+支持固定长度/分隔符/长度字段等增量分帧策略，处理半帧、多帧、噪声和重同步。
+设最大帧长、累计缓存上限和半帧超时；校验失败报告错误并按规则重新寻找帧头。
+UDP 保留报文边界，不默认跨 datagram 拼帧。
+后续解析规则采用声明式配置，不用 eval/任意脚本；协议设计器仍不属于 MVP。
+
+这样它就从：
+
+串口助手
+
+升级成：
+
+嵌入式协议调试工具
+
+14. 日志系统
+
+每个 Session 可以保存：
+
+Timestamp
+Direction
+Data
+Format
+
+例如：
+
+11:30:01.001 RX
+01 03 00 10 00 02 C5 CE
+
+此处假定回环设备原样返回测试字节，不是 Modbus 设备响应示例。
+
+11:30:01.005 TX
+01 03 00 10 00 02
+
+目标日志格式（首版与后续版本范围见下文）：
+
+TXT
+CSV
+JSON
+Binary
+
+并且支持：
+
+Start Recording
+Stop Recording
+Export
+
+记录以原始字节为准，不以当前显示文本为准。
+每条至少包含 schemaVersion/sessionId/sequence、UTC 时间（含日期）、
+direction、peer、字节长度、base64 原始数据、发送结果/错误。
+序号和单调时钟用于排序/耗时；墙上时钟调整不能改变记录顺序。
+TX 成功在本地写入完成后记录；失败、部分成功、结果未知分开记录，
+不能把点击发送时的意图计入成功 TX 字节数。
+MVP 主录制格式为逐行 JSON（JSONL），TXT/CSV 是从该格式导出的视图，
+避免维护多套独立录制管线。CSV 处理引号/换行及表格公式注入风险。
+Binary 原始导出只保留选定方向/客户端的连续字节，不含时间和边界；
+需要完整元数据时使用 JSONL，不把混合客户端/RX-TX 字节流声称为可回放日志。
+MVP 不承诺协议级回放或数据自动重发。
+默认单文件 100 MiB、单次录制总预算 1 GiB，达到预算停止录制并提示；
+不默认删除历史文件。其他轮转/保留策略需用户显式配置。
+磁盘满/权限错误/写入失败立即停止录制并提示，连接可继续，但状态不得仍显示“记录中”。
+正常停止等待队列排空并关闭文件；强制退出可能丢失未落盘尾部，恢复时标记不完整记录。
+15. 数据曲线
+
+MVP 之后的后续版本 B 增加 Plot。
+
+例如：
+
+STM32
+
+TEMP=25.4
+HUM=61.2
+VOLT=3.31
+
+解析后：
+
+Temperature ──────────╮
+                      ╰────
+
+Humidity ────────╮
+                  ╰──────
+
+可以支持：
+
+Serial
+TCP
+UDP
+
+统一进入：
+
+Data Parser
+     ↓
+Numeric Data
+     ↓
+Plot Engine
+
+Plot 属于后续版本，必须沿用有界数据管线。
+文本字段解析先做跨块行分帧，限制行长/系列数/采样点数；
+异常值、无穷值、解析失败需要计数。UI 降采样不改变原始记录。
+持续解析 CPU 成本经测量过高时移至 Worker，不在 Host 上执行长同步循环。
+16. 配置管理
+
+建议两级配置。
+
+全局配置
+
+VS Code Settings：
+
+ect.defaultBaudRate
+ect.defaultDisplayMode
+ect.timestamp
+ect.maxLogLines
+ect.autoReconnect
+项目配置
+.vscode/ect.json
+
+保存：
+
+设备
+串口
+TCP
+UDP
+快捷命令
+协议
+CRC
+解析规则
+
+这样一个 STM32 项目可以直接把通信调试环境一起提交到 Git。
+
+配置优先级：内置默认 < 用户设置 < 明确选择的工作区文件 < 当前会话临时覆盖。
+默认使用用户级 ect.default* 设置；不允许受限工作区覆盖敏感网络/重连选项。
+VS Code manifest 的 configuration 提供类型、范围和 restricted 声明。
+.vscode/ect.json 使用 version 字段及 JSON Schema，严格校验类型、端口、
+范围、引用关系和重复 id；非法配置不覆盖当前运行状态。
+配置只保存用户意图，不保存“已连接”“自动发送运行中”等状态。
+任何项目配置都不在启动时触发连接、监听、发送或录制，需用户主动操作。
+多根工作区必须先选择所属文件夹，按 Uri 隔离配置，禁止默认取第一个根目录。
+无文件夹时保存到 globalState；项目配置经用户保存写入 workspace.fs，
+有写入冲突时提示重载/确认，不覆盖外部修改，不在连接中热切换参数。
+敏感凭据使用 SecretStorage，不能写入项目文件、日志或 Webview 持久状态。
+录制/导出默认由保存对话框选择位置，不默认写入源码目录或提交到 Git。
+
+17. 第一版 MVP
+
+我建议第一阶段严格控制范围。
+
+MVP 功能
+✓ Serial
+✓ TCP Client
+✓ TCP Server
+✓ UDP
+✓ HEX
+✓ ASCII
+✓ 时间戳
+✓ RX/TX
+✓ 自动发送
+✓ 快捷命令
+✓ 多 Session
+✓ JSONL 录制 + TXT/CSV 导出
+✓ 配置保存
+
+暂时不做：
+
+✗ MQTT
+✗ Modbus
+✗ CAN
+✗ BLE
+✗ Protocol Designer
+✗复杂 Plot
+
+MVP 同时包含：发送目标、状态机、资源清理、输入校验、有界缓存、
+安全默认值与原生模块打包验证。这些是基础质量要求，不能留到“工程化以后”。
+CRC/Framer/Parser/Plot 不纳入 MVP；Decimal/Binary 和完整二进制导出后续实现。
+功能按以下里程碑逐步完成，不要求第一个可运行原型覆盖全部接口。
+
+这样能够快速做出第一个可用版本。
+
+18. 开发阶段规划
+以下为 1 名熟悉 TypeScript/VS Code 的开发者、设备及时到位时的初步估算，
+不是交付承诺；不包含多平台认证。MVP 预计 8~12 周，另留约 20% 风险缓冲。
+
+Phase 0：技术风险原型（1 周）
+验证 SerialPort 在打包后 Host 中加载、真实串口收发、本地/远程运行位置、
+工作区 Uri 访问，以及 1 MiB/s TCP 数据经缓存/日志分流后的资源表现。
+退出条件：干净 Windows 机器离线安装 VSIX，可通信，无用户侧编译步骤。
+验证失败则先调整依赖/包结构/支持矩阵，不继续叠加完整 UI。
+
+Phase 1：基础纵向链路（1~2 周）
+Extension、Tree View、React Webview、消息校验、TCP Client、单 Session、
+HEX/ASCII、RX/TX、清空、自动滚动、状态机、有界缓存及基础单元测试。
+退出条件：连接/发送/接收/取消/断开闭环可验证，隐藏面板时资源有界。
+
+Phase 2：通信接口与多会话（2~3 周）
+Serial、TCP Server、UDP、发送目标、客户端列表、设备枚举、
+错误处理与自动重连、多 Session、统一契约测试与硬件测试。
+退出条件：所有接口通过第 19 节通信相关功能和故障验收，无残留端口/计时器；
+录制、配置和性能的完整验收在后续阶段完成。
+
+Phase 3：配置与录制（2 周）
+Quick Commands、Auto Send、Schema、两级配置、Workspace Trust、
+JSONL 录制、TXT/CSV 导出、磁盘故障处理和 Webview 安全验证。
+退出条件：配置不自动执行动作；录制与展示分流，达到上限有明确提示。
+
+Phase 4：发布候选（2~3 周）
+性能、长稳测试、最低 VS Code 版本兼容、离线安装、VSIX 产物检查、
+许可证与 README、真实设备回归；通过发布门禁后再发布首个 MVP。
+
+后续版本 A：CRC/Checksum + Framer/Parser（初估 3~5 周）。
+后续版本 B：有界 Plot + 字段解析/降采样（初估 2~4 周）。
+新增平台、协议设计器、MQTT/Modbus/CAN/BLE 分别立项，不沿用首版工期。
+19. 测试方案
+
+必须准备真实设备测试。
+
+Serial
+STM32
+ESP32
+CH340
+CP2102
+FT232
+USB CDC
+TCP
+Windows PC
+Linux
+ESP32
+STM32 + Ethernet
+UDP
+ESP32
+Linux
+Windows
+压力测试
+
+重点测试：
+
+115200
+921600
+2Mbps
+3Mbps
+
+大量日志：
+
+100 KiB/s
+500 KiB/s
+1 MiB/s
+
+重点验证：
+
+UI 是否卡顿
+Webview 是否崩溃
+Node.js 内存
+Buffer 堵塞
+日志丢失
+TCP 字节流拆块/合块
+UDP 丢包
+Serial 高速数据
+
+测试分层：
+单元测试：Codec、消息/配置校验、状态转换、重连退避、发送队列、
+缓存淘汰、序号、JSONL/CSV 导出；使用可控时钟验证计时器行为。
+接口测试：TCP/UDP 真实回环；串口 mock binding 只验证软件逻辑，
+不能替代硬件对驱动、DTR/RTS、拔插、drain 和高波特率的验证。
+扩展测试：使用 @vscode/test-electron，在真实 Extension Host 中测试命令、
+激活/停用、Tree View、Webview ready/重建和打包后串口加载。
+
+故障用例：
+端口占用、非法地址、拒绝连接、连接超时、连接过程中断开/删除、
+连续开关 100 次、设备拔插、两个 Session 抢同一串口、
+慢速/停止读取的 TCP 对端、多客户端部分发送失败、
+UDP 非预期发送方、权限不足、磁盘满、面板隐藏/销毁/重建、
+受限工作区、远程工作区、配置外部修改、扩展停用与窗口重载。
+断开后重连/自动发送任务为零，正常停止录制后写入队列为空。
+
+性能验收（首个 Windows x64 认证目标，记录 CPU/内存/磁盘、设备及版本）：
+TCP 回环分别以 100 KiB/s、500 KiB/s、1 MiB/s 持续接收 10 分钟，
+1 MiB/s 场景可预览降采样，但录制吞吐必须独立测量。
+以带序号与校验的生成数据对比源端和录制结果；
+在验收负载内接收管线与录制不丢数据，超载必须告警且不无限增长。
+UI 可见时数据显示延迟 p95 目标 <= 250 ms，交互响应 p95 <= 200 ms；
+超载不适用正常延迟目标，但控制命令必须仍可处理。
+扩展增量内存初始预算 <= 256 MiB，Webview <= 128 MiB，
+持续 30 分钟无持续增长；测量归因与最终预算在原型后确认。
+至少 2 小时混合多会话长稳测试，包含隐藏面板和录制轮转。
+串口 8N1 的理论载荷约为 baud/10 字节每秒：
+115200 约 11.52 KB/s，3 Mbps 约 300 KB/s，不能将串口列入 1 MiB/s 保证。
+2/3 Mbps 仅针对支持该速率的设备/驱动测试，不作所有串口硬件的保证。
+UDP 用带序号流量区分源端缺失与应用内丢弃；仅字节计数不能证明网络无丢包。
+TCP 拆块/合块是字节流正常行为，不称为 TCP 错误；后续 Framer 单独验证分帧。
+20. COMTool 的利用策略
+
+这里我建议明确分成：
+
+借鉴
+功能模型
+交互方式
+协议插件思想
+数据格式
+Graph
+Quick Command
+自己实现
+TypeScript Core
+Serial
+TCP
+UDP
+Session
+Webview
+Protocol
+不直接复制
+COMTool GUI
+COMTool Python Core
+COMTool 源码
+
+这样技术架构更干净，也更适合后续发布 VS Code Marketplace。
+
+COMTool 作为功能参考和竞品基准即可。
+
+参考开源项目仍需核对许可证和品牌/素材授权；不复制代码不等于可复制其资源。
+自有实现、第三方依赖、图标均记录来源与许可证，发布包附必要声明。
+
+21. 最终产品架构
+
+最终可以做到：
+
+                         VS Code
+                            │
+              ┌─────────────┴─────────────┐
+              │                           │
+          Code/Debug              Communication
+                                          │
+                               ┌──────────┴──────────┐
+                               │                     │
+                          Connection              Tools
+                               │                     │
+                  ┌────────────┼────────────┐       │
+                  │            │            │       │
+               Serial         TCP          UDP     │
+                  │            │            │       │
+                  └────────────┼────────────┘       │
+                               │                     │
+                         Session Manager             │
+                               │                     │
+                    ┌──────────┼──────────┐          │
+                    ↓          ↓          ↓          ↓
+                  HEX         CRC       Parser      Plot
+                    │          │          │          │
+                    └──────────┴──────────┴──────────┘
+                               │
+                         Log / Export
+22. 最终产品形态
+
+安装插件后，VS Code 左侧增加一个：
+
+🔌 Communication
+
+点击后：
+
+COMMUNICATION
+│
+├── Connections
+│   ├── 🔵 STM32 COM7
+│   ├── 🔵 ESP32 COM8
+│   ├── 🟢 TCP 192.168.1.100:5000
+│   └── 🟢 UDP :6000
+│
+├── Quick Commands
+│
+├── Protocol
+│
+├── Plot
+│
+└── Logs
+
+MVP 仅展示 Connections、Quick Commands、Logs；Protocol/Plot 完成后再暴露入口。
+侧栏使用原生 Tree View，主通信界面用 WebviewPanel；
+遵循 VS Code 主题、键盘操作和屏幕阅读器要求，不靠颜色单独表达连接状态。
+
+这时候它就不是简单的“串口插件”了，而是一个：
+
+面向嵌入式工程师的 VS Code 通信调试工作台。
+
+23. 我建议的第一版技术路线
+
+如果这个项目由你自己或小团队开发，我建议直接定成：
+
+TypeScript + VS Code Extension API + React + Webview + Node.js 原生 TCP/UDP + SerialPort
+
+而不是 Python。
+
+原因很简单：
+
+最终目标是从 VS Code Marketplace 或 VSIX 安装后，在已认证的平台、
+驱动与设备权限齐备的环境直接使用，不要求用户额外安装 Python/Node.js/编译工具。
+SerialPort 使用原生 bindings；必须在构建阶段准备兼容产物并随 VSIX 分发，
+不能在用户安装后运行 npm install/node-gyp 或联网下载依赖。
+
+而 COMTool 则作为功能参考基准。
+
+第一版只做：
+
+Serial + TCP Client/Server + UDP + HEX/ASCII + 自动发送 + Quick Command + 日志 + 多连接
+
+这套 MVP 已经足够做出一个真正能用的版本。后面再往 CRC / Protocol Parser / Plot / MQTT / Modbus 扩展。
+
+下一步先进入 Phase 0 技术风险原型，再冻结项目脚手架：
+确定最低 VS Code 版本、SerialPort 锁定版本、目标平台、消息 Schema、
+Transport 契约、缓存预算和打包清单后，按纵向链路开发。
+通信实现实际为 Serial / TCP Client / TCP Server / UDP 四种，
+不是“Serial/TCP/UDP 三个实现”。
+
+24. 背压与资源预算
+
+性能风险不仅在渲染，还在 Host 的事件循环、格式化、序列化和磁盘写入。
+禁止每个 onData 块单独刷新 React，禁止无限数组/字符串拼接积累接收内容。
+初始预算（后续按 Phase 0 测量修订）：
+1. 每 Session 展示环形缓存最多 4 MiB 原始数据且最多 10000 条记录，
+   两个限制先到即淘汰最旧展示记录；显示淘汰数量，不影响已经录制的数据。
+   React 使用虚拟列表、限制单行展开长度，避免一次渲染全部缓存记录。
+2. 全局展示缓存预算 32 MiB，含隐藏/非活动 Session；不存在无限历史补发。
+3. Webview 每批最多 64 KiB 原始载荷，20~50 ms 聚合一次，
+   每个面板最多 4 批未确认数据；base64/JSON 和复制开销纳入内存测量。
+4. Webview 确认“批次已接收处理”后再发下一批，不能把 postMessage 成功
+   等同于 UI 已渲染。隐藏/销毁时停止推送，重新 ready 后传有界快照。
+5. 客户端慢或批次超时则暂停数据推送，保留有界缓存、提示缺口并重新同步；
+   数据展示可丢弃旧项，控制响应走独立有界通道，不被展示队列阻塞。
+6. 全局录制等待队列最多 16 MiB，采用异步写入与背压，不同步刷盘。
+   高水位时对可暂停的 TCP 接收尝试 pause/resume；
+   Serial 没有硬件流控时暂停读取不能保证设备数据不丢，UDP 无可靠接收背压。
+   到硬上限时停止相关录制、标记记录不完整并告警，不无限排队或静默丢弃。
+7. TCP Server 发送慢客户端不得无限占用队列；逐客户端有界写入，
+   广播使用有界并发和逐客户端超时，慢客户端不阻塞其他客户端。
+8. 指标至少包含 RX/TX bytes、展示淘汰数、待发/待录字节、
+   当前客户端数、重连次数、录制错误和序号缺口。
+
+25. 安全默认值
+
+manifest 声明 capabilities.untrustedWorkspaces.supported: "limited"。
+受限模式可查看已有配置和离线数据，不建立连接、不监听、不发送；
+Host 中检查 workspace.isTrusted，不能仅靠禁用按钮实现安全边界。
+受限工作区的设置和项目文件不能启用重连、自动发送、外部监听或改变录制路径。
+用户授权信任后仍需主动连接，不把信任授予当成自动执行许可。
+原始通信数据、设备名、错误文本均视为不可信输入，React 以文本渲染，
+禁止 dangerouslySetInnerHTML、eval 和根据数据执行命令。
+Webview 使用 nonce/CSP，默认 default-src 'none'，
+仅允许所需本地 script/style/font/img 资源；生产不加载远程脚本或开发服务器。
+使用 webview.asWebviewUri，localResourceRoots 仅允许扩展静态资源目录，
+不开放整个工作区/用户目录；不为了开发方便保留 unsafe-eval。
+Host 不接受 Webview 任意文件路径，导出/录制路径来自 Host 保存对话框。
+TCP/UDP 为明文调试工具，不内置认证/TLS；提示不要直接暴露于公网或不可信网络。
+默认不采集遥测，不上传原始通信数据；日志可能包含凭据，导出前提示敏感信息风险。
+
+26. 构建与发布门禁
+
+CI 流程：依赖锁定安装 -> lint/typecheck -> 单元/集成测试 ->
+Host/Webview 生产构建 -> VSIX 打包与内容检查 -> 干净机器安装冒烟测试。
+若采用按平台发布，使用 @vscode/vsce 的目标平台参数，例如
+vsce package --target win32-x64；验证 Marketplace 的安装选择及离线手动安装。
+保留 serialport、@serialport/bindings-cpp 所需运行时文件及匹配 .node 产物，
+明确 external/运行时路径，检查 .vscodeignore 不误删 prebuilds。
+不得把 Windows 原生产物打成“通用支持所有平台”的 VSIX。
+构建工具链的 Python/C++ 要求属于 CI，不属于已认证平台用户运行要求。
+依赖加载失败仅禁用串口并显示诊断，不让 TCP/UDP 或整个扩展激活失败。
+打包后测试不能只运行源码目录；至少在无 Node.js/Python/编译工具、
+无开发目录的干净目标机器离线安装并真实打开串口。
+README 写明运行位置、支持矩阵、驱动权限、明文网络、安全和性能边界。
+最终发布须满足第 19 节故障/性能验收及许可证检查；不凭功能截图发布。
+
+27. 主要风险与决策记录
+
+高：原生模块平台兼容。
+应对：Phase 0 打包实测、分平台认证；失败时保留网络功能，不静默降级串口。
+高：高速接收影响 Extension Host 与日志完整性。
+应对：有界队列、批量推送、记录分流、压测；持续不达标时评估独立通信进程，
+在有证据前不提前引入复杂 IPC。
+高：自动发送/重连或外部监听产生非预期设备动作。
+应对：安全默认值、显式操作、断线暂停、Host 校验和取消清理。
+中：设备身份不稳定与驱动差异。
+应对：人工选择兜底、真实设备矩阵，不用单一 VID/PID 判定唯一设备。
+中：跨平台、Parser 和 Plot 导致范围膨胀。
+应对：首版 Windows x64、里程碑门禁，后续能力独立排期。
+待 Phase 0 冻结：最低 VS Code 版本、SerialPort 版本、
+真实设备清单、性能基准机器及缓存/磁盘预算。
+
+28. 核对依据
+
+以下官方资料用于核对运行模型、Webview 安全和打包方式；
+具体依赖版本的支持矩阵仍以锁定版本和实际产物测试为准。
+VS Code Extension Host：
+https://code.visualstudio.com/api/advanced-topics/extension-host
+VS Code Remote Extensions：
+https://code.visualstudio.com/api/advanced-topics/remote-extensions
+VS Code Webview：
+https://code.visualstudio.com/api/extension-guides/webview
+VS Code Workspace Trust：
+https://code.visualstudio.com/api/extension-guides/workspace-trust
+VS Code Publishing Extensions：
+https://code.visualstudio.com/api/working-with-extensions/publishing-extension
+SerialPort 安装与原生模块说明：
+https://serialport.io/docs/guide-installation/
+CRC 参数与测试向量核对：
+CRC-16/MODBUS：width=16, poly=0x8005, init=0xffff,
+refin=true, refout=true, xorout=0x0000, check=0x4b37。
+文中两个字节序列已按该参数独立计算；未来实现需加入自动化测试。
